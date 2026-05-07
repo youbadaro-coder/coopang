@@ -38,18 +38,34 @@ def _build_prompt(product_info):
 
 def _parse_json_result(text):
     """JSON 파싱 시도, 실패 시 텍스트 전체를 공통 결과로 반환"""
+    # 1. 순수 JSON 시도
     try:
-        return json.loads(text)
+        return json.loads(text.strip())
     except Exception:
-        # JSON 블록만 추출 시도
-        import re
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except Exception:
-                pass
-        return {"naver": text, "tistory": text, "wordpress": text}
+        pass
+
+    # 2. 마크다운 코드 블록 제거 후 시도 (```json ... ```)
+    import re
+    cleaned = re.sub(r'```json\s*|\s*```', '', text, flags=re.IGNORECASE).strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    # 3. { } 블록만 추출 시도
+    match = re.search(r'(\{.*\})', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            pass
+
+    # 모든 시도 실패 시 텍스트를 나눔 (임시 방편)
+    return {
+        "naver": f"내용 파싱 실패. 원문:\n{text}",
+        "tistory": f"내용 파싱 실패. 원문:\n{text}",
+        "wordpress": f"내용 파싱 실패. 원문:\n{text}"
+    }
 
 
 def _error_result(msg):
@@ -116,14 +132,26 @@ def generate_with_gemini(product_info, api_key):
     try:
         client = genai.Client(api_key=api_key)
         prompt = _build_prompt(product_info)
+        # 가장 안정적이고 빠른 gemini-1.5-flash 모델 사용
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-1.5-flash',
             contents=prompt,
             config={"response_mime_type": "application/json"}
         )
+        
+        if not response.text:
+            return _error_result("❌ Gemini로부터 빈 응답을 받았습니다.")
+            
         return _parse_json_result(response.text)
     except Exception as e:
-        return _error_result(f"❌ Gemini 오류: {str(e)}")
+        error_msg = str(e)
+        if "403" in error_msg:
+            return _error_result("❌ Gemini API 키 권한 오류 (403). API 키가 올바른지 확인해 주세요.")
+        elif "429" in error_msg:
+            return _error_result("❌ Gemini 할당량 초과 (429). 잠시 후 다시 시도해 주세요.")
+        elif "404" in error_msg:
+            return _error_result("❌ Gemini 모델을 찾을 수 없습니다 (404). API 설정에서 gemini-1.5-flash가 활성화되어 있는지 확인해 주세요.")
+        return _error_result(f"❌ Gemini 오류: {error_msg}")
 
 
 # ──────────────────────────────────────────

@@ -1,4 +1,5 @@
 import streamlit as st
+import time
 from scraper import get_coupang_product_info, get_best_products
 from generator import generate_blog_post
 
@@ -9,15 +10,22 @@ if 'menu' not in st.session_state:
     st.session_state.menu = "URL로 글 생성"
 if 'target_url' not in st.session_state:
     st.session_state.target_url = ""
+if 'auto_generate' not in st.session_state:
+    st.session_state.auto_generate = False
+
+def start_auto_posting(url):
+    """추천 리스트에서 클릭 시 호출되는 콜백 함수"""
+    st.session_state.target_url = url
+    st.session_state.menu = "URL로 글 생성"
+    st.session_state.auto_generate = True
 
 # ── 사이드바 설정 ──────────────────────────────
 with st.sidebar:
     st.title("⚙️ 설정 및 메뉴")
-    # 세션 상태를 index로 연결하여 메뉴 전환 제어
+    
+    # 메뉴 선택 (key를 'menu'로 지정하여 세션 상태와 직접 연동)
     menu_options = ["URL로 글 생성", "🔥 베스트 상품 추천"]
-    menu_index = menu_options.index(st.session_state.menu)
-    st.session_state.menu = st.radio("메뉴 선택", menu_options, index=menu_index)
-    menu = st.session_state.menu
+    menu = st.radio("메뉴 선택", menu_options, key="menu")
     st.markdown("---")
 
     st.subheader("🤖 AI 모델 선택")
@@ -34,11 +42,28 @@ with st.sidebar:
         st.caption("LM Studio가 실행 중이고 'Local Server'가 Start 상태여야 합니다.\n(포트: 1234)")
         api_key = None
     else:
-        api_key = st.text_input(
+        # 세션 상태에서 API 키 초기값 가져오기
+        if 'gemini_api_key' not in st.session_state:
+            st.session_state.gemini_api_key = ""
+            
+        api_key_input = st.text_input(
             "Gemini API Key",
+            value=st.session_state.gemini_api_key,
             type="password",
             help="Google AI Studio에서 발급받은 API 키를 입력하세요. 무료로 하루 1,500회 사용 가능."
         )
+        # 입력된 키 저장
+        st.session_state.gemini_api_key = api_key_input
+        api_key = api_key_input # 호환성 유지
+
+        if api_key:
+            if api_key.startswith("AIza"):
+                st.success("✅ API 키 형식이 올바릅니다. (연결 준비 완료)")
+            else:
+                st.warning("⚠️ API 키 형식이 이상합니다. 확인해 주세요. (보통 AIza로 시작)")
+        else:
+            st.error("❌ API 키를 입력해 주세요.")
+            
         st.markdown("[🔗 무료 API 키 발급받기](https://aistudio.google.com/app/apikey)")
 
 
@@ -58,45 +83,78 @@ if menu == "URL로 글 생성":
 
     with col1:
         st.subheader("1. 쿠팡 링크 입력")
-        # 세션 상태에서 URL을 가져옴
-        product_url = st.text_input("쿠팡 상품 URL", value=st.session_state.target_url, placeholder="https://www.coupang.com/vp/products/...")
-        # URL이 수동으로 입력되면 세션 상태 업데이트
-        st.session_state.target_url = product_url
+        # key를 'target_url'로 직접 지정하여 세션 상태와 동기화
+        product_url = st.text_input(
+            "쿠팡 상품 URL", 
+            key="target_url",
+            placeholder="https://www.coupang.com/vp/products/..."
+        )
         generate_btn = st.button("🚀 블로그 글 생성하기", use_container_width=True, type="primary")
 
-        if generate_btn:
+        # 자동 생성 트리거 또는 버튼 클릭 시
+        if generate_btn or st.session_state.auto_generate:
+            # 자동 생성 플래그는 한 번 사용 후 초기화
+            current_url = st.session_state.target_url if st.session_state.auto_generate else product_url
+            st.session_state.auto_generate = False
+            
             # 유효성 검사
             if not use_local and not api_key:
                 st.error("Gemini API 키를 먼저 입력해주세요. (또는 LM Studio 무료 모드로 전환하세요)")
                 st.stop()
-            if not product_url:
+            if not current_url:
                 st.warning("쿠팡 상품 URL을 입력해주세요.")
                 st.stop()
 
             model_label = "LM Studio (로컬 무료)" if use_local else "Gemini API"
-            with st.status(f"[{model_label}] 상품 정보 수집 및 글 생성 중...", expanded=True) as status:
-                st.write("🔍 상품 정보를 수집하는 중입니다...")
-                product_info = get_coupang_product_info(product_url)
+            
+            # 진행 상태 바 초기화
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            time_text = st.empty()
+            
+            start_time = time.time()
+            
+            def update_progress(percent, msg, est_total=None):
+                progress_bar.progress(percent)
+                elapsed = time.time() - start_time
+                if est_total:
+                    remaining = max(0, est_total - elapsed)
+                    time_text.caption(f"⏱️ 경과 시간: {elapsed:.1f}초 | ⏳ 예상 남은 시간: {remaining:.1f}초")
+                else:
+                    time_text.caption(f"⏱️ 경과 시간: {elapsed:.1f}초")
+                status_text.write(f"**[{percent}%]** {msg}")
 
-                if not product_info:
-                    status.update(label="데이터 수집 실패", state="error")
-                    st.error("상품 정보를 가져오지 못했습니다. URL을 확인해주세요.")
-                    st.stop()
+            # 예상 소요 시간 설정 (LM Studio는 더 길게 잡음)
+            est_total_time = 60 if use_local else 15
 
-                title_display = product_info['title'] if product_info['title'] else "(상품명 수집 불가 - 쿠팡 차단)"
-                st.write(f"✅ 상품명: {title_display}")
-                st.write(f"✅ 가격: {product_info['price'] or '수집 불가'}")
-                st.write(f"✍️ [{model_label}] AI가 3가지 플랫폼용 글을 작성 중입니다...")
+            update_progress(10, "🔍 상품 정보를 수집하는 중입니다...", est_total_time)
+            product_info = get_coupang_product_info(current_url)
 
-                blog_posts = generate_blog_post(
-                    product_info,
-                    api_key=api_key,
-                    use_local=use_local
-                )
+            if not product_info:
+                st.error("상품 정보를 가져오지 못했습니다. URL을 확인해주세요.")
+                st.stop()
 
-                status.update(label="✅ 글 생성 완료!", state="complete")
-                st.session_state['blog_posts'] = blog_posts
-                st.session_state['current_product'] = product_info
+            update_progress(30, f"✅ 상품명 확인: {product_info['title'][:30]}...", est_total_time)
+            update_progress(40, f"✍️ {model_label} AI가 3가지 플랫폼용 글을 작성 중입니다. 잠시만 기다려주세요...", est_total_time)
+            
+            # AI 추론 시작 (가상 프로그레스 업데이트를 위해 스레드 대신 루프 내에서 처리하거나 단순화)
+            # 여기서는 API 호출이 블로킹이므로 호출 직전 %를 올림
+            blog_posts = generate_blog_post(
+                product_info,
+                api_key=api_key,
+                use_local=use_local
+            )
+
+            update_progress(90, "🧹 생성된 글을 정리하고 서식을 적용하는 중입니다...", est_total_time)
+            time.sleep(0.5)
+            
+            update_progress(100, "🎉 모든 플랫폼용 포스팅 생성이 완료되었습니다!", est_total_time)
+            
+            st.session_state['blog_posts'] = blog_posts
+            st.session_state['current_product'] = product_info
+            
+            total_elapsed = time.time() - start_time
+            st.success(f"✅ 총 {total_elapsed:.1f}초 만에 생성이 완료되었습니다.")
 
     with col2:
         st.subheader("2. 생성된 결과물")
@@ -105,19 +163,19 @@ if menu == "URL로 글 생성":
             tab1, tab2, tab3 = st.tabs(["🟢 네이버 블로그", "🍊 티스토리", "🔵 워드프레스"])
 
             with tab1:
-                st.text_area("📋 복사용 텍스트", posts['naver'], height=300)
+                st.text_area("📋 복사용 텍스트", posts['naver'], height=300, key="res_naver")
                 st.markdown("---")
                 st.markdown("**📄 미리보기**")
                 st.markdown(posts['naver'])
 
             with tab2:
-                st.text_area("📋 복사용 마크다운", posts['tistory'], height=300)
+                st.text_area("📋 복사용 마크다운", posts['tistory'], height=300, key="res_tistory")
                 st.markdown("---")
                 st.markdown("**📄 미리보기**")
                 st.markdown(posts['tistory'])
 
             with tab3:
-                st.text_area("📋 복사용 마크다운", posts['wordpress'], height=300)
+                st.text_area("📋 복사용 마크다운", posts['wordpress'], height=300, key="res_wordpress")
                 st.markdown("---")
                 st.markdown("**📄 미리보기**")
                 st.markdown(posts['wordpress'])
@@ -203,11 +261,13 @@ elif menu == "🔥 베스트 상품 추천":
                                 c2.markdown(f"**{item['title']}**")
                                 c2.markdown(f"💰 **{price_display}**")
                                 
-                                # 바로 글쓰기 연결 버튼
-                                if c3.button("✍️ 포스팅 쓰기", key=f"write_{idx}_{cat_name}"):
-                                    st.session_state.target_url = item['url']
-                                    st.session_state.menu = "URL로 글 생성"
-                                    st.rerun()
+                                # 바로 글쓰기 연결 버튼 (on_click 콜백 사용)
+                                c3.button(
+                                    "✍️ 포스팅 쓰기", 
+                                    key=f"write_{idx}_{cat_name}",
+                                    on_click=start_auto_posting,
+                                    args=(item['url'],)
+                                )
                                 st.markdown("---")
                         else:
                             st.info(f"'{price_filter}' 조건에 해당하는 상품이 없습니다.")
