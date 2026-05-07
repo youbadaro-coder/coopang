@@ -126,21 +126,50 @@ def generate_with_lmstudio(product_info, base_url="http://localhost:1234"):
 # ──────────────────────────────────────────
 #  Gemini API (무료 키 필요)
 # ──────────────────────────────────────────
-def generate_with_gemini(product_info, api_key):
+def generate_with_gemini(product_info, api_key, gemini_model=None):
     if not api_key:
         return _error_result("❌ Gemini API 키가 입력되지 않았습니다.")
     try:
         client = genai.Client(api_key=api_key)
+        
+        # 모델 결정 (매개변수로 전달받았으면 우선 사용, 없으면 자동 감지)
+        selected_model = gemini_model
+        
+        if not selected_model:
+            available_models = []
+            try:
+                for m in client.models.list():
+                    if 'generateContent' in m.supported_generation_methods:
+                        available_models.append(m.name.replace("models/", ""))
+            except Exception:
+                pass
+            
+            # 우선순위 탐색
+            target_models = ['gemini-2.0-pro', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash']
+            for tm in target_models:
+                if tm in available_models:
+                    selected_model = tm
+                    break
+            
+            if not selected_model:
+                selected_model = available_models[0] if available_models else 'gemini-1.5-flash'
+
         prompt = _build_prompt(product_info)
-        # 가장 안정적이고 빠른 gemini-1.5-flash 모델 사용
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=prompt,
-            config={"response_mime_type": "application/json"}
-        )
+        try:
+            response = client.models.generate_content(
+                model=selected_model,
+                contents=prompt,
+                config={"response_mime_type": "application/json"}
+            )
+        except Exception:
+            # JSON 모드 실패 시 일반 텍스트 재시도
+            response = client.models.generate_content(
+                model=selected_model,
+                contents=prompt
+            )
         
         if not response.text:
-            return _error_result("❌ Gemini로부터 빈 응답을 받았습니다.")
+            return _error_result(f"❌ Gemini({selected_model})로부터 빈 응답을 받았습니다.")
             
         return _parse_json_result(response.text)
     except Exception as e:
@@ -150,19 +179,15 @@ def generate_with_gemini(product_info, api_key):
         elif "429" in error_msg:
             return _error_result("❌ Gemini 할당량 초과 (429). 잠시 후 다시 시도해 주세요.")
         elif "404" in error_msg:
-            return _error_result("❌ Gemini 모델을 찾을 수 없습니다 (404). API 설정에서 gemini-1.5-flash가 활성화되어 있는지 확인해 주세요.")
+            return _error_result(f"❌ Gemini 모델 미지원 (404): {error_msg}\n현재 계정에서 사용 가능한 모델이 없습니다. API 키를 다시 확인하거나 다른 키를 사용해 보세요.")
         return _error_result(f"❌ Gemini 오류: {error_msg}")
 
 
 # ──────────────────────────────────────────
 #  통합 진입점
 # ──────────────────────────────────────────
-def generate_blog_post(product_info, api_key=None, use_local=False, lmstudio_url="http://localhost:1234"):
-    """
-    use_local=True  → LM Studio 로컬 모델 (완전 무료, API 키 불필요)
-    use_local=False → Gemini API (무료 키 필요)
-    """
+def generate_blog_post(product_info, api_key=None, use_local=False, lmstudio_url="http://localhost:1234", gemini_model=None):
     if use_local:
         return generate_with_lmstudio(product_info, base_url=lmstudio_url)
     else:
-        return generate_with_gemini(product_info, api_key)
+        return generate_with_gemini(product_info, api_key, gemini_model=gemini_model)

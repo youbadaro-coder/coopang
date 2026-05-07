@@ -59,6 +59,15 @@ with st.sidebar:
         if api_key:
             if api_key.startswith("AIza"):
                 st.success("✅ API 키 형식이 올바릅니다. (연결 준비 완료)")
+                # 가용 모델 목록 표시 시도
+                try:
+                    from google import genai
+                    client = genai.Client(api_key=api_key)
+                    models = [m.name.replace("models/", "") for m in client.models.list() if 'generateContent' in m.supported_generation_methods]
+                    if models:
+                        st.info(f"📋 가용 모델: {', '.join(models[:5])}...")
+                except Exception:
+                    pass
             else:
                 st.warning("⚠️ API 키 형식이 이상합니다. 확인해 주세요. (보통 AIza로 시작)")
         else:
@@ -71,11 +80,33 @@ with st.sidebar:
 if menu == "URL로 글 생성":
     st.title("🛍️ 쿠팡 상품 리뷰 자동 생성")
     
-    # 현재 사용 모델 뱃지
-    if use_local:
-        st.info("🆓 현재 **LM Studio** 모드 — API 키 없이 완전 무료로 실행 중입니다.")
-    else:
+    # 1. API 키 확인 및 모델 목록 가져오기
+    available_models = []
+    if not use_local and api_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            available_models = [m.name.replace("models/", "") for m in client.models.list() if 'generateContent' in m.supported_generation_methods]
+        except Exception:
+            pass
+
+    # 2. 모델 선택 UI 및 안내 메시지
+    if not use_local:
+        if available_models:
+            # 우선순위에 따른 기본값 설정
+            default_idx = 0
+            for i, m in enumerate(available_models):
+                if '2.0-flash' in m or '1.5-flash' in m:
+                    default_idx = i
+                    break
+            selected_model_id = st.selectbox("🎯 사용할 Gemini 모델 선택", available_models, index=default_idx)
+        else:
+            selected_model_id = "gemini-1.5-flash"
+            st.warning("⚠️ 사용 가능한 모델 목록을 가져오지 못했습니다. 기본 모델(1.5-flash)을 시도합니다.")
         st.info("🔑 현재 **Gemini API** 모드 — 무료 한도(하루 1,500회) 내에서 사용 중입니다.")
+    else:
+        selected_model_id = None
+        st.info("🆓 현재 **LM Studio** 모드 — API 키 없이 완전 무료로 실행 중입니다.")
 
     st.markdown("상품 링크를 입력하면 **네이버, 티스토리, 워드프레스** 맞춤형 글을 동시에 생성합니다.")
 
@@ -137,12 +168,12 @@ if menu == "URL로 글 생성":
             update_progress(30, f"✅ 상품명 확인: {product_info['title'][:30]}...", est_total_time)
             update_progress(40, f"✍️ {model_label} AI가 3가지 플랫폼용 글을 작성 중입니다. 잠시만 기다려주세요...", est_total_time)
             
-            # AI 추론 시작 (가상 프로그레스 업데이트를 위해 스레드 대신 루프 내에서 처리하거나 단순화)
-            # 여기서는 API 호출이 블로킹이므로 호출 직전 %를 올림
+            # 글 생성 실행 (선택된 모델 전달)
             blog_posts = generate_blog_post(
                 product_info,
                 api_key=api_key,
-                use_local=use_local
+                use_local=use_local,
+                gemini_model=selected_model_id if not use_local else None
             )
 
             update_progress(90, "🧹 생성된 글을 정리하고 서식을 적용하는 중입니다...", est_total_time)
